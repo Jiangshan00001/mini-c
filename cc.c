@@ -9,7 +9,6 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-
 void error (char* format);
 
 //No enums :(
@@ -17,7 +16,6 @@ int PTR_SIZE = 8;
 int WORD_SIZE = 8;
 
 FILE* output;
-
 int token;
 
 int TOKEN_OTHER = 0;
@@ -26,7 +24,16 @@ int TOKEN_INT = 2;
 int TOKEN_CHAR = 3;
 int TOKEN_STR = 4;
 
-
+///添加类型支持
+int typ;
+int TYPE_UNKNOWN=0;
+int TYPE_VOID=1;
+int TYPE_INT=2;
+int TYPE_CHAR=3;
+int TYPE_VOID_PTR=4;
+int TYPE_INT_PTR=5;
+int TYPE_CHAR_PTR=6;
+int TYPE_CHAR_PTR_PTR=7;
 
 //==== Lexer ====
 
@@ -185,25 +192,34 @@ bool try_match (char* look) {
 }
 
 //==== Symbol table ====
+
+
 ///全局变量字符串指针的指针列表
 char** globals;
 /// 和globals数量一致，代表是否是函数
 bool* is_fn;
+int* globals_type;
+
 ///是否外部，如果是外部，则间接调用。内部的则直接调用
 bool* is_extern;
 bool curr_is_extern=false;
-///全局变量初始值，以字符串的形式提供
+///全局变量初始值，以整数的形式提供
 int* globals_init_val;
 /// 全局函数/变量的 个数
 int global_no = 0;
 
+
 ///局部变量的字符串指针的列表
 char** locals;
-/// 偏移量，和locals长度一致。
+/// 局部变量在栈中的偏移量，和locals长度一致。
 int* offsets;
+int* locals_type;
+
 /// 局部变量个数
 int local_no = 0;
 int param_no = 0;
+
+
 
 ///字符串常量
 char **const_strs;
@@ -213,11 +229,13 @@ int const_strs_no = 0;
 
 void sym_init (int max) {
     globals = malloc(PTR_SIZE*max);
+    globals_type = calloc(max, PTR_SIZE);
     globals_init_val = calloc(max, PTR_SIZE);
     is_fn = calloc(max, PTR_SIZE);
     is_extern = calloc(max, PTR_SIZE);
 
     locals = malloc(PTR_SIZE*max);
+    locals_type=calloc(max, WORD_SIZE);
     offsets = calloc(max, WORD_SIZE);
 
     const_strs=malloc(PTR_SIZE*max);
@@ -226,12 +244,13 @@ void sym_init (int max) {
 
 void new_global (char* ident)
 {
+    globals_type[global_no] = typ;
     globals[global_no++] = ident;
 }
 
 void new_fn (char* ident, int is_ext)
 {
-    printf("func:%s-%d\n", ident, is_ext);
+    fprintf(output,";func:%s-%d\n", ident, is_ext);
     is_fn[global_no] = true;
     is_extern[global_no]=is_ext;
     new_global(ident);
@@ -242,8 +261,10 @@ int new_local (char* ident)
     int var_index = local_no - param_no;
 
     locals[local_no] = ident;
+    locals_type[local_no] = typ;
     //The first local variable is directly below the base pointer
     offsets[local_no] = -WORD_SIZE*(var_index+1);
+    fprintf(output, ";new local:%s. type=%d\n", ident, typ);
     return local_no++;
 }
 
@@ -255,7 +276,7 @@ void new_param (char* ident) {
     // 2. the return address, [ebp+W]
     // 3. the first parameter, [ebp+2W]
     //   and so on
-    offsets[local] = WORD_SIZE*(2 + param_no++);///2->1 jiangshan
+    offsets[local] = WORD_SIZE*(2 + param_no++);
 }
 
 //Enter the scope of a new function
@@ -306,43 +327,35 @@ void expr (int level);
 
 int char_preprocess(char* buf)
 {
-    //    if(strncmp(buf,"'",1)!=0)
-    //    {
-    //        printf("char error%s. buf0=%08x c=%08x\n", buf, buf[0], '\'');
-    //        error("char error%s\n");
-    //        return 0;
-    //    }
-    if(strncmp(buf,"\\",1)!=0)
-    {
-        //不是特殊字符，直接返回
-        return  12345;
-    }
+
+
     ///特殊字符处理
-    if(strncmp(buf+1,"n",1)==0)
+    //if(strncmp(buf+1,"n",1)==0)
+    if(buf[1]=='n')
     {
         return '\n';
     }
-    else if(strncmp(buf+1,"r",1)==0)
+    else if(buf[1]=='r') //if(strncmp(buf+1,"r",1)==0)
     {
         return '\r';
     }
-    else if(strncmp(buf+1,"t",1)==0)
+    else if(buf[1]=='t')//if(strncmp(buf+1,"t",1)==0)
     {
         return '\t';
     }
-    else if(strncmp(buf+1,"0",1)==0)
+    else if(buf[1]=='0')// if(strncmp(buf+1,"0",1)==0)
     {
         return '\0';
     }
-    else if(strncmp(buf+1,"\\",1)==0)
+    else if(buf[1]=='\\') //if(strncmp(buf+1,"\\",1)==0)
     {
         return '\\';
     }
-    else if(strncmp(buf+1,"'",1)==0)
+    else if(buf[1]=='\'')//if(strncmp(buf+1,"'",1)==0)
     {
         return '\'';
     }
-    else if(strncmp(buf+1,"x",1)==0)
+    else if(buf[1]=='x')//if(strncmp(buf+1,"x",1)==0)
     {
         return 255;//atoi(buf+2); FIXME .此处只有1个字符，就是\xff
     }
@@ -400,7 +413,7 @@ int char_preprocess(char* buf)
 void factor ()
 {
     lvalue = false;
-
+    typ=TYPE_UNKNOWN;
     if (see("true") || see("false"))
     {
         fprintf(output, "mov rax, %d\n", see("true") ? 1 : 0);
@@ -421,19 +434,20 @@ void factor ()
         }
 
         ///FIXME: 此处应该是先局部变量，再全局变量???
-        if (global >= 0)
+        if (local >= 0)
+        {
+            /// 局部变量，通过栈指针获取
+            fprintf(output, "%s rax, [rbp%+d]\n", lvalue ? "lea" : "mov", offsets[local]);
+            typ=locals_type[local];
+        }
+        else  if (global >= 0)
         {
             ///全局变量，通过变量名读取
             /// 全局函数，外部和内部的调用方式不一致，所以此处需要记录???
             fprintf(output, "%s rax, [%s]\n", is_fn[global] || lvalue ? "lea" : "mov", globals[global]);
             curr_is_extern=is_extern[global];
+            typ = globals_type[global];
         }
-        else if (local >= 0)
-        {
-            /// 局部变量，通过栈指针获取
-            fprintf(output, "%s rax, [rbp%+d]\n", lvalue ? "lea" : "mov", offsets[local]);
-        }
-
     }
     else if (token == TOKEN_INT)
     {
@@ -443,7 +457,7 @@ void factor ()
     else if(token==TOKEN_CHAR)
     {
         int char_out = 0;
-        if(strncmp(buffer+1,"\\",1)!=0)
+        if(buffer[1]!='\\')
         {
             //不是特殊字符，直接返回
             fprintf(output, "mov rax, %s\n", buffer);
@@ -480,7 +494,6 @@ void factor ()
             /// 两个字符串连接在一起
             const_strs[const_strs_no-1]=strdup(str_n);
             free(str_n);
-            //printf("str cat to:%s\n", const_strs[const_strs_no-1]);
             next();
         }
     }
@@ -587,6 +600,8 @@ void object () {
         }
         else if (try_match("["))
         {
+            int lv_typ;
+            lv_typ = typ;//先记录下类型，避免后期被覆盖
             /// 中括号：
             /// 1 push eax; 先将左值eax放入栈
             /// 2 val->eax求中括号内的表达式的值（默认会放入eax中）
@@ -599,19 +614,35 @@ void object () {
             if (see("=") || see("++") || see("--"))
                 lvalue = true;
 
-            fprintf(output, "pop rbx\n"
-                            "%s rax, [rax*%d+rbx]\n", lvalue ? "lea" : "mov", WORD_SIZE);
+
+            if (lv_typ==TYPE_CHAR_PTR)
+            {
+                fprintf(output, "pop rbx\n"
+                                "%s rax, [rax*%d+rbx]\n", lvalue ? "lea" : "mov", 1);
+                typ = TYPE_CHAR;
+            }
+            else
+            {
+                fprintf(output, "pop rbx\n"
+                                "%s rax, [rax*%d+rbx]\n", lvalue ? "lea" : "mov", WORD_SIZE);
+
+                if (lv_typ==TYPE_CHAR_PTR_PTR)
+                    typ=TYPE_CHAR_PTR;
+                else
+                    typ=TYPE_INT;
+            }
 
         }
         else
         {
-            return;
+            return ;
         }
     }
 }
 
 void unary () {
-    if (try_match("!")) {
+    if (try_match("!"))
+    {
         /// last in first out.
         //Recurse to allow chains of unary operations, LIFO order
         unary();
@@ -620,11 +651,14 @@ void unary () {
               "mov rax, 0\n"
               "sete al\n", output);
 
-    } else if (try_match("-")) {
+    }
+    else if (try_match("-"))
+    {
         unary();
         fputs("neg rax\n", output);
 
-    } else {
+    } else
+    {
         //This function call compiles itself
         object();
 
@@ -644,36 +678,63 @@ void branch (bool expr);
 
 void expr (int level)
 {
+    ///通过level解决优先级问题
+    ///
+    ///
+
     if (level == 5)
     {
+        // 如果5级了。可以 处理单目运算符，并返回
         unary();
         return;
     }
 
+    int left_typ=TYPE_INT;
+    int right_typ = TYPE_INT;
+
+    ///否则，先去处理更高优先级的表达式
     expr(level+1);
 
+    left_typ = typ;
+
     while (  level == 4 ? see("+") || see("-") || see("*")
-             : level == 3 ? see("==") || see("!=") || see("<") || see(">=")
+             : level == 3 ? see("==") || see("!=") || see("<") || see(">=")|| see(">")
              : false)
     {
+        ///优先级4: +-*
+        /// 优先级3: == != < >=
         fputs("push rax\n", output);
 
         char* instr = see("+") ? "add" : see("-") ? "sub" : see("*") ? "imul" :
-                                                                       see("==") ? "e" : see("!=") ? "ne" : see("<") ? "l" : "ge";
+                                                                       see("==") ? "e" : see("!=") ? "ne" : see("<") ? "l" : see(">=")? "ge" :"g";
 
         next();
         expr(level+1);
+        right_typ = typ;
 
         if (level == 4)
+        {/// +-* 数据
             fprintf(output, "mov rbx, rax\n"
                             "pop rax\n"
                             "%s rax, rbx\n", instr);
+        }
 
         else
-            fprintf(output, "pop rbx\n"
-                            "cmp rbx, rax\n"
+        {/// == != < > >= 判断
+            fputs("pop rbx\n",output);
+
+            if(left_typ==TYPE_CHAR)
+            {
+                fputs("and rbx, 0xff\n", output);
+            }
+            if(right_typ==TYPE_CHAR)
+            {
+                fputs("and rax, 0xff\n", output);
+            }
+            fprintf(output, "cmp rbx, rax\n"
                             "mov rax, 0\n"
                             "set%s al\n", instr);
+        }
     }
 
     if (level == 2) while (see("||") || see("&&")) {
@@ -688,7 +749,9 @@ void expr (int level)
     }
 
     if (level == 1 && try_match("?"))
+    {
         branch(true);
+    }
 
 
     if (level == 0 && try_match("="))
@@ -699,13 +762,21 @@ void expr (int level)
 
         needs_lvalue("assignment requires a modifiable object\n");
         expr(level+1);
-
-        fputs("pop rbx\n"
-              "mov  [rbx], rax\n", output);//dword ptr
+        right_typ=typ;
+        fputs("pop rbx\n",output);
+        if(left_typ==TYPE_CHAR)
+        {
+            fputs("mov byte [rbx], al\n", output);//dword ptr
+        }
+        else
+        {
+            fputs("mov  [rbx], rax\n", output);//dword ptr
+        }
     }
+
 }
 
-void line ();
+void statmens ();
 
 void branch (bool isexpr)
 {
@@ -715,7 +786,7 @@ void branch (bool isexpr)
     fprintf(output, "cmp rax, 0\n"
                     "je _%08d\n", false_branch);
 
-    isexpr ? expr(1) : line();
+    isexpr ? expr(1) : statmens();
 
     fprintf(output, "jmp _%08d\n", join);
     fprintf(output, "\t_%08d:\n", false_branch);
@@ -725,7 +796,7 @@ void branch (bool isexpr)
         expr(1);
 
     } else if (try_match("else"))
-        line();
+        statmens();
 
     fprintf(output, "\t_%08d:\n", join);
 }
@@ -746,10 +817,10 @@ void for_loop(){
 
     must_match("for");
     must_match("(");
-    line();
+    statmens();
 
     emit_label(if_jmp_start);
-    line();
+    statmens();
 
     fprintf(output, "cmp rax, 0\n"
                     "jne _%08d\n", loop_body_start);
@@ -764,7 +835,7 @@ void for_loop(){
 
 
     emit_label(loop_body_start);
-    line();
+    statmens();
     fprintf(output, "jmp _%08d\n", every_loop_add);
 
     emit_label(loop_end);
@@ -776,7 +847,7 @@ void while_loop () {
     bool do_while = try_match("do");
 
     if (do_while)
-        line();
+        statmens();
 
     must_match("while");
     must_match("(");
@@ -790,7 +861,7 @@ void while_loop () {
         must_match(";");
 
     else
-        line();
+        statmens();
 
     fprintf(output, "jmp _%08d\n", loop_to);
     fprintf(output, "\t_%08d:\n", break_to);
@@ -806,7 +877,7 @@ int DECL_PARAM = 3;
 ///
 /// \brief line stat. 一个语句???
 ///
-void line ()
+void statmens ()
 {
     if (see("if"))
         if_branch();
@@ -823,7 +894,7 @@ void line ()
     else if (try_match("{"))
     {
         while (waiting_for("}"))
-            line();
+            statmens();
 
         must_match("}");
 
@@ -842,7 +913,7 @@ void line ()
     }
 }
 
-void function (char* ident) {
+void function_body (char* ident) {
     //Body
     int i=0;
     int body = emit_label(new_label());
@@ -850,8 +921,6 @@ void function (char* ident) {
 
     ///此处是函数体内部
     /// 应该先将参数放入堆栈，方便当前代码使用
-    ///
-
     for(i=0;i<param_no;i++)
     {
         if(i==0)
@@ -872,7 +941,7 @@ void function (char* ident) {
         }
     }
 
-    line();
+    statmens();
 
     if(strcmp(ident, "main")==0)
     {
@@ -899,6 +968,54 @@ void function (char* ident) {
                     "jmp _%08d\n", local_no*WORD_SIZE, body);
 }
 
+int try_eat_type()
+{
+    typ=TYPE_UNKNOWN;
+    if(try_match("void"))
+    {
+        typ=TYPE_VOID;
+    }else   if(try_match("int"))
+    {
+        typ=TYPE_INT;
+    }
+    else        if(try_match("FILE"))
+    {
+        typ=TYPE_INT;
+    }
+    else if(try_match("bool"))
+    {
+        typ=TYPE_INT;
+    }
+    else if(try_match("char"))
+    {
+        typ=TYPE_CHAR;
+    }
+    else
+    {
+        //unknown type???
+        printf("unknown typ: %s. curline=%d \n", buffer, curln);
+        return 0;
+    }
+
+    if (try_match("*"))
+    {
+        typ=typ+3;///FIXME:此处是暴力
+        if(try_match("*"))
+        {
+            if(typ==TYPE_CHAR_PTR)
+            {
+                typ=TYPE_CHAR_PTR_PTR;
+            }
+            else
+            {
+                error("unsupported type:%s\n");
+            }
+        }
+        while(try_match("*"));
+    }
+    return 1;
+}
+
 void decl (int kind) {
     //A C declaration comes in three forms:
     // - Local decls, which end in a semicolon and can have an initializer.
@@ -909,10 +1026,9 @@ void decl (int kind) {
     bool fn_impl = false;
     int local;
 
-    next();
+    // this will collect the typ
+    try_eat_type();
 
-    while (try_match("*"))
-        ;
 
     //Owned (freed) by the symbol table
     char* ident = strdup(buffer);
@@ -947,7 +1063,7 @@ void decl (int kind) {
             require(kind == DECL_MODULE, "a function implementation is illegal here\n");
 
             fn_impl = true;
-            function(ident);
+            function_body(ident);
         }
 
         //Add it to the symbol table
@@ -1057,26 +1173,17 @@ void program () {
         ///FIXME: "abcd" 此处双引号需要去掉。当前通过j=1..strlen-1去掉了。后期需要在别处去掉??
         for(j=1;j<strlen(const_strs[i])-1;j++)
         {
-            if(strncmp(const_strs[i]+j,"\\",1)==0)
+            //if(strncmp(const_strs[i]+j,"\\",1)==0)
+            if(const_strs[i][j]=='\\')
             {
                 ///此处下一个字符是特殊字符
-                if(strncmp(const_strs[i]+j+1,"x",1)==0)
-                {
-
-                    /// \xFF
-                    /// FIXME: 此处只支持0xff
-                    fprintf(output, "%u, ", 255);
-                    j=j+3;
-
-                }
-                else
                 {
                     int f1=char_preprocess(const_strs[i]+j);
                     fprintf(output, "%u, ", f1);
                     j++;
                 }
             }
-            else if(strncmp(const_strs[i]+j,"'",1)==0)
+            else if(const_strs[i][j]=='\'') //  if(strncmp(const_strs[i]+j,"'",1)==0)
             {
                 fprintf(output, "%u, ", '\'');
             }
@@ -1087,8 +1194,6 @@ void program () {
             }
         }
         fprintf(output, "0\n");
-
-
     }
 
     ///程序结尾
@@ -1151,17 +1256,17 @@ int main (int argc, char** argv)
     //No arrays? Fine! A 0xFFFFFF terminated string of null terminated strings will do.
     //A negative-terminated null-terminated strings string, if you will
     char* std_fns = "getchar\0malloc\0calloc\0free\0atoi\0fopen\0fclose\0fgetc\0ungetc\0feof\0fputs\0fprintf\0puts\0printf\0"
-                    "isalpha\0isdigit\0isalnum\0strlen\0strcmp\0strncmp\0strchr\0strcpy\0strdup\0sprintf\0\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF";
+                    "isalpha\0isdigit\0isalnum\0strlen\0strcmp\0strncmp\0strchr\0strcpy\0strdup\0sprintf\0\xFF\xFF\xFF\xFF";
 
     /// 声明系统内部函数
     //Remember that mini-c is typeless, so this is both a byte read and a 4 byte read.
     //(char) 0xFF == -1, (int) 0xFFFFFF == -1
-    while (std_fns[0] != -1) {
+    while (std_fns[0] != '\xff') {
         char *tmp=strdup(std_fns);
         new_fn(tmp,1);
         std_fns = std_fns+strlen(std_fns)+1;
     }
-    printf("start program\n");
+    printf("parse start\n");
 
     program();
 
